@@ -5,7 +5,7 @@ import argparse
 import yaml
 import torch
 
-from utilities.data.dataset import AudioDataset
+from audioldm_train.utilities.data.dataset import AudioDataset
 
 from torch.utils.data import DataLoader
 from pytorch_lightning import seed_everything
@@ -78,7 +78,11 @@ def infer(dataset_json, configs, config_yaml_path, exp_group_name, exp_name):
     ]
 
     checkpoint = torch.load(resume_from_checkpoint)
-    latent_diffusion.load_state_dict(checkpoint["state_dict"])
+    try:
+        latent_diffusion.load_state_dict(checkpoint["state_dict"])
+    except Exception as e:
+        print(e)
+        latent_diffusion.load_state_dict(checkpoint["state_dict"], strict=False)
 
     latent_diffusion.eval()
     latent_diffusion = latent_diffusion.cuda()
