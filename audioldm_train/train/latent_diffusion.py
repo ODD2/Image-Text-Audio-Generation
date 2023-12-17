@@ -37,7 +37,7 @@ def print_on_rank0(msg):
         print(msg)
 
 
-def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation):
+def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation, debug=False):
     if "seed" in configs.keys():
         seed_everything(configs["seed"])
     else:
@@ -145,6 +145,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation
         project=configs["project"],
         config=configs,
         name="%s/%s" % (exp_group_name, exp_name),
+        offline=debug
     )
 
     latent_diffusion.test_data_subset_path = test_data_subset_folder
@@ -223,6 +224,11 @@ if __name__ == "__main__":
         help="path to pretrained checkpoint",
     )
 
+    parser.add_argument(
+        "--debug",
+        action="store_true"
+    )
+
     parser.add_argument("--val", action="store_true")
 
     args = parser.parse_args()
@@ -248,4 +254,4 @@ if __name__ == "__main__":
         ]["params"]["use_gt_mae_output"] = False
         config_yaml["step"]["limit_val_batches"] = None
 
-    main(config_yaml, config_yaml_path, exp_group_name, exp_name, perform_validation)
+    main(config_yaml, config_yaml_path, exp_group_name, exp_name, perform_validation, debug=args.debug)
