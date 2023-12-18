@@ -28,6 +28,9 @@ from audioldm_train.modules.audiomae.sequence_gen.sequence_input import (
 import numpy as np
 from audioldm_train.modules.audiomae.sequence_gen.model import Prenet
 
+import clip
+
+
 """
 The model forward function can return three types of data:
 1. tensor: used directly as conditioning signal
@@ -1228,7 +1231,7 @@ class CLAPAudioEmbeddingClassifierFreev2(nn.Module):
                 self.random_uniform(0, end=int(t_steps * self.max_random_mute_portion))
             )
             mute_start = int(self.random_uniform(0, t_steps - mute_size))
-            waveform[i, mute_start : mute_start + mute_size] = 0
+            waveform[i, mute_start: mute_start + mute_size] = 0
         return waveform
 
     def cos_similarity(self, waveform, text):
@@ -1334,6 +1337,183 @@ class CLAPAudioEmbeddingClassifierFreev2(nn.Module):
             return_tensors="pt",
         )
         return {k: v.squeeze(0) for k, v in result.items()}
+
+
+class CLIPSharedBlock(nn.Module):
+    def __init__(
+        self,
+        architecture="ViT-B/16"
+    ):
+        super().__init__()
+        self.model, _ = clip.load(architecture, "cpu")
+        self.model.requires_grad_(False)
+        self.model.eval()
+
+    def train(self, mode=True):
+        self.model.eval()
+
+
+class CLIPImageAdaptor(CLIPSharedBlock):
+    def __init__(self, architecture="ViT-B/16", pretrained_path=""):
+        super().__init__(architecture)
+        self.model = self.model.visual
+        self.model.requires_grad_(False)
+        if (len(pretrained_path) > 0):
+            state_dict = torch.load(pretrained_path)["state_dict"]
+            self.model.proj.load_state_dict(state_dict)
+        self.model.proj.requires_grad_(True)
+
+    def forward(self, x):
+        return self.model(x)
+
+    def train(self, mode=True):
+        self.model.eval()
+
+
+class CLAPAudioEmbeddingClassifierFreev3(CLAPAudioEmbeddingClassifierFreev2):
+    def __init__(
+        self,
+        batchsize=None,
+        clip_pretrained="",
+        architecture="ViT-B/16",
+        * args,
+        **kargs,
+
+    ):
+        super().__init__(*args, **kargs)
+        self.clip = CLIPImageAdaptor(architecture, clip_pretrained)
+
+    def get_image_embedding(self, batch):
+        return self.clip(batch)
+
+    def forward(self, batch, detach=True):
+        # If you want this conditioner to be unconditional, set self.unconditional_prob = 1.0
+        # If you want this conditioner to be fully conditional, set self.unconditional_prob = 0.0
+        if self.model.training == True and not self.training_mode:
+            print(
+                "The pretrained CLAP model should always be in eval mode. Reloading model just in case you change the parameters."
+            )
+            self.model, self.model_cfg = create_model(
+                self.amodel,
+                self.tmodel,
+                self.pretrained,
+                precision=self.precision,
+                device="cuda",
+                enable_fusion=self.enable_fusion,
+                fusion_type=self.fusion_type,
+            )
+            for p in self.model.parameters():
+                p.requires_grad = False
+            self.model.eval()
+
+        if self.unconditional_token is None:
+            self.build_unconditional_emb()
+
+        # if(self.training_mode):
+        #     assert self.model.training == True
+        # else:
+        #     assert self.model.training == False
+
+        # the 'fusion' truncate mode can be changed to 'rand_trunc' if run in unfusion mode
+        if self.embed_mode == "audio":
+            if not self.training:
+                print("INFO: clap model calculate the audio embedding as condition")
+            with torch.no_grad():
+                # assert (
+                #     self.sampling_rate == 16000
+                # ), "We only support 16000 sampling rate"
+
+                # if self.random_mute:
+                #     batch = self._random_mute(batch)
+                # batch: [bs, 1, t-samples]
+                if self.sampling_rate != 48000:
+                    batch = torchaudio.functional.resample(
+                        batch, orig_freq=self.sampling_rate, new_freq=48000
+                    )
+
+                audio_data = batch.squeeze(1)
+                mel = self.mel_transform(audio_data)
+                audio_dict = get_audio_features(
+                    audio_data,
+                    mel,
+                    480000,
+                    data_truncating="fusion",
+                    data_filling="repeatpad",
+                    audio_cfg=self.model_cfg["audio_cfg"],
+                )
+                # [bs, 512]
+                embed = self.model.get_audio_embedding(audio_dict)
+        elif self.embed_mode == "text":
+            with torch.no_grad():
+                # the 'fusion' truncate mode can be changed to 'rand_trunc' if run in unfusion mode
+                text_data = self.tokenizer(batch)
+
+                if isinstance(batch, str) or (
+                    isinstance(batch, list) and len(batch) == 1
+                ):
+                    for key in text_data.keys():
+                        text_data[key] = text_data[key].unsqueeze(0)
+
+                embed = self.model.get_text_embedding(text_data)
+        elif self.embed_mode == "image":
+            audio_data = batch
+            embed = self.get_image_embedding(audio_data)
+
+        embed = embed.unsqueeze(1)
+        for i in range(embed.size(0)):
+            if self.make_decision(self.unconditional_prob):
+                embed[i] = self.unconditional_token
+        # embed = torch.randn((batch.size(0), 1, 512)).type_as(batch)
+        if (detach):
+            return embed.detach()
+        else:
+            return embed
+
+    def three_modal_contrastive_loss(self, datas):
+        modal_embed = {}
+        pre_mode = self.embed_mode
+
+        for modal in ["audio", "text", "image"]:
+            self.embed_mode = modal
+            modal_embed[modal] = self(datas[modal], detach=False)
+
+        image_embedding = modal_embed["image"].squeeze(1)
+        text_embedding = modal_embed["text"].squeeze(1)
+        audio_embedding = modal_embed["audio"].squeeze(1)
+        image_embedding = image_embedding / image_embedding.norm(dim=-1, keepdim=True)
+        text_embedding = text_embedding / text_embedding.norm(dim=-1, keepdim=True)
+        audio_embedding = audio_embedding / audio_embedding.norm(dim=-1, keepdim=True)
+
+        image_to_audio = 100 * image_embedding @ audio_embedding.T
+        image_to_text = 100 * image_embedding @ text_embedding.T
+        audio_to_text = 100 * audio_embedding @ text_embedding.T
+
+        loss = (
+            torch.nn.functional.cross_entropy(
+                image_to_audio,
+                torch.arange(image_to_audio.size(0)).to(image_to_audio.device)
+            ) * 0.5 +
+            torch.nn.functional.cross_entropy(
+                image_to_text,
+                torch.arange(image_to_text.size(0)).to(image_to_text.device)
+            ) * 0.5
+        )
+
+        self.embed_mode = pre_mode
+
+        # metrics
+        i2a_probs = image_to_audio.softmax(dim=-1).detach().cpu().numpy()
+        i2t_probs = image_to_text.softmax(dim=-1).detach().cpu().numpy()
+        a2t_probs = audio_to_text.softmax(dim=-1).detach().cpu().numpy()
+        labels = torch.arange(image_to_text.size(0)).numpy()
+
+        return dict(
+            loss=loss.mean(),
+            i2a_probs=i2a_probs,
+            i2t_probs=i2t_probs,
+            a2t_probs=a2t_probs,
+            labels=labels
+        )
 
 
 if __name__ == "__main__":

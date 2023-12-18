@@ -17,6 +17,11 @@ import numpy as np
 import torchaudio
 import json
 
+from PIL import Image
+from torchvision.transforms import (
+    Compose, Resize, CenterCrop, ToTensor, Normalize, InterpolationMode
+)
+
 
 def dynamic_range_compression_torch(x, C=1, clip_val=1e-5):
     return torch.log(torch.clamp(x, min=clip_val) * C)
@@ -334,12 +339,12 @@ class AudioDataset(Dataset):
         for i in range(10):
             random_start = int(self.random_uniform(0, waveform_length - target_length))
             if torch.max(
-                torch.abs(waveform[:, random_start : random_start + target_length])
+                torch.abs(waveform[:, random_start: random_start + target_length])
                 > 1e-4
             ):
                 break
 
-        return waveform[:, random_start : random_start + target_length], random_start
+        return waveform[:, random_start: random_start + target_length], random_start
 
     def pad_wav(self, waveform, target_length):
         waveform_length = waveform.shape[-1]
@@ -355,7 +360,7 @@ class AudioDataset(Dataset):
         else:
             rand_start = 0
 
-        temp_wav[:, rand_start : rand_start + waveform_length] = waveform
+        temp_wav[:, rand_start: rand_start + waveform_length] = waveform
         return temp_wav
 
     def trim_wav(self, waveform):
@@ -367,7 +372,7 @@ class AudioDataset(Dataset):
             waveform_length = waveform.shape[0]
             start = 0
             while start + chunk_size < waveform_length:
-                if np.max(np.abs(waveform[start : start + chunk_size])) < threshold:
+                if np.max(np.abs(waveform[start: start + chunk_size])) < threshold:
                     start += chunk_size
                 else:
                     break
@@ -378,7 +383,7 @@ class AudioDataset(Dataset):
             waveform_length = waveform.shape[0]
             start = waveform_length
             while start - chunk_size > 0:
-                if np.max(np.abs(waveform[start - chunk_size : start])) < threshold:
+                if np.max(np.abs(waveform[start - chunk_size: start])) < threshold:
                     start -= chunk_size
                 else:
                     break
@@ -537,7 +542,7 @@ class AudioDataset(Dataset):
             m = torch.nn.ZeroPad2d((0, 0, 0, p))
             log_mel_spec = m(log_mel_spec)
         elif p < 0:
-            log_mel_spec = log_mel_spec[0 : self.target_length, :]
+            log_mel_spec = log_mel_spec[0: self.target_length, :]
 
         if log_mel_spec.size(-1) % 2 != 0:
             log_mel_spec = log_mel_spec[..., :-1]
@@ -578,15 +583,164 @@ class AudioDataset(Dataset):
         bs, freq, tsteps = log_mel_spec.size()
         mask_len = int(self.random_uniform(freqm // 8, freqm))
         mask_start = int(self.random_uniform(start=0, end=freq - mask_len))
-        log_mel_spec[:, mask_start : mask_start + mask_len, :] *= 0.0
+        log_mel_spec[:, mask_start: mask_start + mask_len, :] *= 0.0
         return log_mel_spec
 
     def time_masking(self, log_mel_spec, timem):
         bs, freq, tsteps = log_mel_spec.size()
         mask_len = int(self.random_uniform(timem // 8, timem))
         mask_start = int(self.random_uniform(start=0, end=tsteps - mask_len))
-        log_mel_spec[:, :, mask_start : mask_start + mask_len] *= 0.0
+        log_mel_spec[:, :, mask_start: mask_start + mask_len] *= 0.0
         return log_mel_spec
+
+
+class MusicDataset(AudioDataset):
+    def __init__(
+        self,
+        config=None,
+        split="train",
+        waveform_only=False,
+        add_ons=[],
+        dataset_json=None,
+    ):
+        """
+        Dataset that manages audio recordings
+        :param audio_conf: Dictionary containing the audio loading and preprocessing settings
+        :param dataset_json_file
+        """
+        self.config = config
+        self.split = split
+        self.pad_wav_start_sample = 0  # If none, random choose
+        self.trim_wav = False
+        self.waveform_only = waveform_only
+        self.add_ons = [eval(x) for x in add_ons]
+        print("Add-ons:", self.add_ons)
+
+        ####
+        self.wav_folder = self.config["data"]["wav_folder"]
+        self.img_folder = self.config["data"]["img_folder"]
+        self.img_types = self.config["data"]["img_types"]
+        self.build_setting_parameters()
+
+        # For an external dataset
+        if dataset_json is not None:
+            self.data = dataset_json["data"]
+            self.id2label, self.index_dict, self.num2label = {}, {}, {}
+        else:
+            self.metadata_root = load_json(self.config["metadata_root"])
+            self.dataset_name = self.config["data"][self.split]
+            assert split in self.config["data"].keys(), (
+                "The dataset split %s you specified is not present in the config. You can choose from %s"
+                % (split, self.config["data"].keys())
+            )
+            self.build_dataset()
+            self.build_id_to_label()
+            self.filter_missing_data()
+
+        self.build_dsp()
+        self.label_num = len(self.index_dict)
+        print("Dataset initialize finished")
+
+        def _convert_image_to_rgb(image):
+            return image.convert("RGB")
+
+        self.img_preprocess = Compose([
+            Resize(224, interpolation=InterpolationMode.BICUBIC),
+            CenterCrop(224),
+            _convert_image_to_rgb,
+            ToTensor(),
+            Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
+        ])
+
+    def build_dataset(self):
+        self.data = []
+        print("Build dataset split %s from %s" % (self.split, self.dataset_name))
+        if type(self.dataset_name) is str:
+            data_json = load_json(
+                self.get_dataset_metadata_path(self.dataset_name, key=self.split)
+            )
+            data_json = self._relative_path_to_absolute_path(
+                data_json, self.dataset_name
+            )
+            self.data = data_json["data"]
+        elif type(self.dataset_name) is list:
+            for dataset_name in self.dataset_name:
+                data_json = load_json(
+                    self.get_dataset_metadata_path(dataset_name, key=self.split)
+                )
+                data_json = self._relative_path_to_absolute_path(
+                    data_json, dataset_name
+                )
+                self.data += data_json["data"]
+        else:
+            raise Exception("Invalid data format")
+
+        for data in self.data:
+            base_path = data["wav"].replace(".wav", ".png")
+            data["images"] = [
+                base_path.replace(
+                    self.wav_folder,
+                    os.path.join(self.img_folder, img_type)
+                )
+                for img_type in self.img_types
+            ]
+
+        print("Data size: {}".format(len(self.data)))
+
+    def filter_missing_data(self):
+        pass_data = []
+        for data in self.data:
+            # check audio file
+            if (not os.path.exists(data["wav"])):
+                continue
+            # check image file
+            i = 0
+            for img in data["images"]:
+                if (os.path.exists(img)):
+                    i += 1
+            if (not i == len(data["images"])):
+                continue
+            pass_data.append(data)
+        self.data = pass_data
+
+    def __getitem__(self, index):
+        (
+            fname,
+            waveform,
+            stft,
+            log_mel_spec,
+            label_vector,  # the one-hot representation of the audio class
+            # the metadata of the sampled audio file and the mixup audio file (if exist)
+            (datum, mix_datum),
+            random_start,
+        ) = self.feature_extraction(index)
+        text = self.get_sample_text_caption(datum, mix_datum, label_vector)
+        image = self.img_preprocess(Image.open(random.choice(datum["images"])))
+        data = {
+            "text": text,  # list
+            "fname": self.text_to_filename(text) if (not fname) else fname,  # list
+            # tensor, [batchsize, class_num]
+            "label_vector": "" if (label_vector is None) else label_vector.float(),
+            # tensor, [batchsize, 1, samples_num]
+            "waveform": "" if (waveform is None) else waveform.float(),
+            # tensor, [batchsize, t-steps, f-bins]
+            "stft": "" if (stft is None) else stft.float(),
+            # tensor, [batchsize, t-steps, mel-bins]
+            "log_mel_spec": "" if (log_mel_spec is None) else log_mel_spec.float(),
+            "duration": self.duration,
+            "sampling_rate": self.sampling_rate,
+            "random_start_sample_in_original_audio_file": random_start,
+            "image": image,
+        }
+
+        for add_on in self.add_ons:
+            data.update(add_on(self.config, data, self.data[index]))
+
+        if data["text"] is None:
+            print("Warning: The model return None on key text", fname)
+            data["text"] = ""
+
+        return data
 
 
 if __name__ == "__main__":
@@ -610,7 +764,7 @@ if __name__ == "__main__":
 
     config = yaml.load(
         open(
-            "/mnt/bn/lqhaoheliu/project/audio_generation_diffusion/config/vae_48k_256/ds_8_kl_1.0_ch_16.yaml",
+            "audioldm_train/config/2023_08_23_reproduce_audioldm/audioldm_clip_clap.yaml",
             "r",
         ),
         Loader=yaml.FullLoader,
@@ -619,16 +773,16 @@ if __name__ == "__main__":
     add_ons = config["data"]["dataloader_add_ons"]
 
     # load_json(data)
-    dataset = AudioDataset(
+    dataset = MusicDataset(
         config=config, split="train", waveform_only=False, add_ons=add_ons
     )
 
     loader = DataLoader(dataset, batch_size=1, num_workers=0, shuffle=True)
 
-    for cnt, each in tqdm(enumerate(loader)):
+    for cnt, each in enumerate(tqdm(loader)):
         # print(each["waveform"].size(), each["log_mel_spec"].size())
         # print(each['freq_energy_percentile'])
-        import ipdb
+        # import ipdb
 
-        ipdb.set_trace()
-        # pass
+        # ipdb.set_trace()
+        pass
