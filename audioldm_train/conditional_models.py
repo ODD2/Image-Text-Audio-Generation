@@ -1151,7 +1151,7 @@ class CLAPAudioEmbeddingClassifierFreev2(nn.Module):
         sampling_rate=16000,
         embed_mode="audio",
         amodel="HTSAT-base",
-        unconditional_prob=0.1,
+        unconditional_prob=0,
         random_mute=False,
         max_random_mute_portion=0.5,
         training_mode=True,
@@ -1369,17 +1369,43 @@ class CLIPImageAdaptor(CLIPSharedBlock):
                 nn.GELU(),
                 nn.Linear(512, 512, bias=False)
             )
+        elif adaptor_type == "linear_v3":
+            self.transition = nn.Sequential(
+                nn.LayerNorm(512),
+                nn.Linear(512, 512, bias=False),
+                nn.GELU(),
+                nn.Dropout(),
+                nn.Linear(512, 512, bias=False),
+                nn.GELU(),
+                nn.Dropout(),
+                nn.Linear(512, 512, bias=False)
+            )
+        elif adaptor_type == "linear_v4":
+            self.transition = nn.Sequential(
+                nn.LayerNorm(512),
+                nn.Linear(512, 512, bias=True),
+            )
 
     def forward(self, x):
         embed = self.model(x)
         if (self.adaptor_type == "linear"):
             pass
-        elif (self.adaptor_type == "linear_v2"):
+        elif (
+            self.adaptor_type == "linear_v2" or
+            self.adaptor_type == "linear_v3" or
+            self.adaptor_type == "linear_v4"
+        ):
             embed = self.transition(embed) + embed
         return embed
 
     def train(self, mode=True):
         self.model.eval()
+        if (
+            self.adaptor_type == "linear_v2" or
+            self.adaptor_type == "linear_v3" or
+            self.adaptor_type == "linear_v4"
+        ):
+            self.transition.train(mode)
 
 
 class CLAPAudioEmbeddingClassifierFreev3(CLAPAudioEmbeddingClassifierFreev2):

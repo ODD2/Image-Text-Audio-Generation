@@ -1,0 +1,60 @@
+metadata_root: "./data/dataset/metadata/music_dataset_root.json"
+log_directory: "./log/latent_diffusion"
+project: "audioldm"
+precision: "high"
+
+variables:
+  sampling_rate: &sampling_rate 16000 
+  mel_bins: &mel_bins 64
+  latent_embed_dim: &latent_embed_dim 8
+  latent_t_size: &latent_t_size 256 # TODO might need to change
+  latent_f_size: &latent_f_size 16
+  in_channels: &unet_in_channels 8
+  optimize_ddpm_parameter: &optimize_ddpm_parameter true
+  optimize_gpt: &optimize_gpt true
+  warmup_steps: &warmup_steps 2000
+
+data: 
+  train: ["musiccaps"]
+  val: "musiccaps"
+  test: "musiccaps"
+  class_label_indices: ""
+  dataloader_add_ons: []
+  wav_folder: "wavs"
+  img_folder: "images"
+  img_types: ["mix","cart","real"]
+
+step:
+  validation_every_n_epochs: 5
+  save_checkpoint_every_n_steps: 5000
+  # limit_val_batches: 2
+  max_steps: 800000
+  save_top_k: 1
+
+preprocessing:
+  audio:
+    sampling_rate: *sampling_rate
+    max_wav_value: 32768.0
+    duration: 10.24
+  stft:
+    filter_length: 1024
+    hop_length: 160
+    win_length: 1024
+  mel:
+    n_mel_channels: *mel_bins
+    mel_fmin: 0
+    mel_fmax: 8000 
+
+augmentation:
+  mixup: 0.0
+
+model:
+  target: audioldm_train.conditional_models.CLAPAudioEmbeddingClassifierFreev3
+  params:
+    pretrained_path: data/checkpoints/clap_music_speech_audioset_epoch_15_esc_89.98.pt
+    sampling_rate: 16000
+    embed_mode: text # or text
+    amodel: HTSAT-base
+    batchsize: 256
+    adaptor_type: "linear_v3"
+    
