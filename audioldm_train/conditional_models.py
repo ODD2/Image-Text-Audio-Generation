@@ -1354,13 +1354,10 @@ class CLIPSharedBlock(nn.Module):
 
 
 class CLIPImageAdaptor(CLIPSharedBlock):
-    def __init__(self, architecture="ViT-B/16", pretrained_path=""):
+    def __init__(self, architecture="ViT-B/16"):
         super().__init__(architecture)
         self.model = self.model.visual
         self.model.requires_grad_(False)
-        if (len(pretrained_path) > 0):
-            state_dict = torch.load(pretrained_path)["state_dict"]
-            self.model.proj.load_state_dict(state_dict)
         self.model.proj.requires_grad_(True)
 
     def forward(self, x):
@@ -1374,17 +1371,22 @@ class CLAPAudioEmbeddingClassifierFreev3(CLAPAudioEmbeddingClassifierFreev2):
     def __init__(
         self,
         batchsize=None,
-        clip_pretrained="",
         architecture="ViT-B/16",
+        extra_pretrained_path="",
         * args,
         **kargs,
 
     ):
         super().__init__(*args, **kargs)
-        self.clip = CLIPImageAdaptor(architecture, clip_pretrained)
+        self.clip = CLIPImageAdaptor(architecture)
+
+        if (len(extra_pretrained_path) > 0):
+            self.load_state_dict(torch.load(extra_pretrained_path), strict=False)
 
     def get_image_embedding(self, batch):
-        return self.clip(batch)
+        embedding = self.clip(batch)
+        embedding = embedding / embedding.norm(dim=-1, keepdim=True)
+        return embedding
 
     def forward(self, batch, detach=True):
         # If you want this conditioner to be unconditional, set self.unconditional_prob = 1.0
