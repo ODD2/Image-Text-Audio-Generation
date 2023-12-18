@@ -1941,7 +1941,7 @@ class LatentDiffusion(DDPM):
                             torch.FloatTensor(waveform).squeeze(1), text
                         )
                         for i in range(z.shape[0]):
-                            candidates = similarity[i :: z.shape[0]]
+                            candidates = similarity[i:: z.shape[0]]
                             max_index = torch.argmax(candidates).item()
                             best_index.append(i + max_index * z.shape[0])
 
@@ -2285,6 +2285,40 @@ class LatentDiffusionVAELearnable(LatentDiffusion):
             on_step=True,
             on_epoch=False,
         )
+
+
+class LatentDiffusionV2(LatentDiffusion):
+    def random_clap_condition(self):
+        # This function is only used during training, let the CLAP model to use both text and audio as condition
+        assert self.training == True
+
+        for key in self.cond_stage_model_metadata.keys():
+            metadata = self.cond_stage_model_metadata[key]
+            model_idx, cond_stage_key, conditioning_key = (
+                metadata["model_idx"],
+                metadata["cond_stage_key"],
+                metadata["conditioning_key"],
+            )
+
+            # If we use CLAP as condition, we might use audio for training, but we also must use text for evaluation
+            if issubclass(
+                type(self.cond_stage_models[model_idx]), CLAPAudioEmbeddingClassifierFreev2
+            ):
+                self.cond_stage_model_metadata[key][
+                    "cond_stage_key_orig"
+                ] = self.cond_stage_model_metadata[key]["cond_stage_key"]
+                self.cond_stage_model_metadata[key][
+                    "embed_mode_orig"
+                ] = self.cond_stage_models[model_idx].embed_mode
+                if torch.randn(1).item() < 0.333:
+                    self.cond_stage_model_metadata[key]["cond_stage_key"] = "text"
+                    self.cond_stage_models[model_idx].embed_mode = "text"
+                elif 0.333 < torch.randn(1).item() < 0.666:
+                    self.cond_stage_model_metadata[key]["cond_stage_key"] = "waveform"
+                    self.cond_stage_models[model_idx].embed_mode = "audio"
+                else:
+                    self.cond_stage_model_metadata[key]["cond_stage_key"] = "image"
+                    self.cond_stage_models[model_idx].embed_mode = "image"
 
 
 if __name__ == "__main__":

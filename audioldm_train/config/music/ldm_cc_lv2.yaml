@@ -49,7 +49,7 @@ augmentation:
   mixup: 0.0
 
 model:
-  target: audioldm_train.modules.latent_diffusion.ddpm.LatentDiffusion
+  target: audioldm_train.modules.latent_diffusion.ddpm.LatentDiffusionV2
   params: 
     # Autoencoder
     first_stage_config:
