@@ -56,4 +56,5 @@ model:
     embed_mode: text # or text
     amodel: HTSAT-base
     batchsize: 16
+    adaptor_type: "linear_v2"
     

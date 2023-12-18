@@ -17,6 +17,8 @@ import numpy as np
 import torchaudio
 import json
 
+
+import albumentations as alb
 from PIL import Image
 from torchvision.transforms import (
     Compose, Resize, CenterCrop, ToTensor, Normalize, InterpolationMode
@@ -652,6 +654,12 @@ class MusicDataset(AudioDataset):
             Normalize((0.48145466, 0.4578275, 0.40821073), (0.26862954, 0.26130258, 0.27577711)),
         ])
 
+        self.img_train_augmentation = alb.Compose([
+            alb.RandomResizedCrop(224, 224, scale=(0.5, 1.0),),
+            alb.HorizontalFlip(),
+            alb.VerticalFlip(),
+        ])
+
     def build_dataset(self):
         self.data = []
         print("Build dataset split %s from %s" % (self.split, self.dataset_name))
@@ -715,7 +723,14 @@ class MusicDataset(AudioDataset):
             random_start,
         ) = self.feature_extraction(index)
         text = self.get_sample_text_caption(datum, mix_datum, label_vector)
-        image = self.img_preprocess(Image.open(random.choice(datum["images"])))
+
+        image = Image.open(random.choice(datum["images"]))
+        if (self.split == "train"):
+            image = np.array(image)
+            image = self.img_train_augmentation(image=image)["image"]
+            image = Image.fromarray(image)
+        image = self.img_preprocess(image)
+
         data = {
             "text": text,  # list
             "fname": self.text_to_filename(text) if (not fname) else fname,  # list

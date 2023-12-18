@@ -65,10 +65,10 @@ def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation
         dataloader_add_ons = []
 
     dataset = MusicDataset(configs, split="train", add_ons=dataloader_add_ons)
-
+    batch_size = 256
     loader = DataLoader(
         dataset,
-        batch_size=256,
+        batch_size=8 if debug else batch_size,
         num_workers=8,
         pin_memory=True,
         shuffle=True,
@@ -84,19 +84,19 @@ def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation
 
     val_loader = DataLoader(
         val_dataset,
-        batch_size=50,
+        batch_size=batch_size,
         drop_last=True
     )
 
     clip_clap = instantiate_from_config(configs["model"])
-
+    clip_clap.unconditional_prob = 0.0
     clip_clap = clip_clap.to("cuda")
 
     optimizer = torch.optim.AdamW(clip_clap.parameters(), lr=3e-4)
 
     # init wandb
     wandb.init(
-        project="NTUHW1",
+        project="audioldm",
         mode=("offline"if debug else "online")
     )
     wandb.watch(models=clip_clap, log="gradients", log_freq=100)
@@ -114,7 +114,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation
                 audio=data["waveform"].to(memory_format=torch.contiguous_format, device="cuda").float(),
                 text=list(data["text"])
             ))
-            loss = results["loss"]
+            loss = results["ce_loss"] + results["mse_loss"]
             loss.backward()
             optimizer.step()
             optimizer.zero_grad()
@@ -131,6 +131,8 @@ def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation
 
             metrics = dict(
                 loss=loss.detach(),
+                ce_loss=results["ce_loss"].detach(),
+                mse_loss=results["mse_loss"].detach(),
                 i2a_top3=i2a_top3,
                 i2t_top3=i2t_top3,
                 a2t_top3=a2t_top3
@@ -161,7 +163,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation
                     audio=data["waveform"].to(memory_format=torch.contiguous_format, device="cuda").float(),
                     text=list(data["text"])
                 ))
-                loss = results["loss"]
+                loss = results["ce_loss"] + results["mse_loss"]
                 pbar.set_description(f"training loss: {loss}")
 
                 # metrics

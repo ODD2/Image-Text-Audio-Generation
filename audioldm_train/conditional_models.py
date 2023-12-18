@@ -1354,14 +1354,29 @@ class CLIPSharedBlock(nn.Module):
 
 
 class CLIPImageAdaptor(CLIPSharedBlock):
-    def __init__(self, architecture="ViT-B/16"):
+    def __init__(self, architecture="ViT-B/16", adaptor_type="linear"):
         super().__init__(architecture)
         self.model = self.model.visual
         self.model.requires_grad_(False)
-        self.model.proj.requires_grad_(True)
+        self.adaptor_type = adaptor_type
+        if adaptor_type == "linear":
+            self.model.proj.requires_grad_(True)
+        elif adaptor_type == "linear_v2":
+            self.transition = nn.Sequential(
+                nn.Linear(512, 512, bias=False),
+                nn.GELU(),
+                nn.Linear(512, 512, bias=False),
+                nn.GELU(),
+                nn.Linear(512, 512, bias=False)
+            )
 
     def forward(self, x):
-        return self.model(x)
+        embed = self.model(x)
+        if (self.adaptor_type == "linear"):
+            pass
+        elif (self.adaptor_type == "linear_v2"):
+            embed = self.transition(embed) + embed
+        return embed
 
     def train(self, mode=True):
         self.model.eval()
@@ -1373,12 +1388,13 @@ class CLAPAudioEmbeddingClassifierFreev3(CLAPAudioEmbeddingClassifierFreev2):
         batchsize=None,
         architecture="ViT-B/16",
         extra_pretrained_path="",
+        adaptor_type="linear",
         * args,
         **kargs,
 
     ):
         super().__init__(*args, **kargs)
-        self.clip = CLIPImageAdaptor(architecture)
+        self.clip = CLIPImageAdaptor(architecture, adaptor_type)
 
         if (len(extra_pretrained_path) > 0):
             self.load_state_dict(torch.load(extra_pretrained_path), strict=False)
@@ -1486,19 +1502,27 @@ class CLAPAudioEmbeddingClassifierFreev3(CLAPAudioEmbeddingClassifierFreev2):
         text_embedding = text_embedding / text_embedding.norm(dim=-1, keepdim=True)
         audio_embedding = audio_embedding / audio_embedding.norm(dim=-1, keepdim=True)
 
-        image_to_audio = 100 * image_embedding @ audio_embedding.T
-        image_to_text = 100 * image_embedding @ text_embedding.T
-        audio_to_text = 100 * audio_embedding @ text_embedding.T
+        logit_scale = 10
+        image_to_audio = logit_scale * image_embedding @ audio_embedding.T
+        image_to_text = logit_scale * image_embedding @ text_embedding.T
+        audio_to_text = logit_scale * audio_embedding @ text_embedding.T
+        labels = torch.arange(image_to_audio.size(0)).to(image_to_audio.device)
+        ce_loss = (
+            0.5 * (
+                torch.nn.functional.cross_entropy(
+                    image_to_audio,
+                    labels,
+                ) +
+                torch.nn.functional.cross_entropy(
+                    image_to_text,
+                    labels
+                )
+            )
+        )
 
-        loss = (
-            torch.nn.functional.cross_entropy(
-                image_to_audio,
-                torch.arange(image_to_audio.size(0)).to(image_to_audio.device)
-            ) * 0.5 +
-            torch.nn.functional.cross_entropy(
-                image_to_text,
-                torch.arange(image_to_text.size(0)).to(image_to_text.device)
-            ) * 0.5
+        mse_loss = (
+            (image_embedding - audio_embedding).norm(dim=-1).mean() +
+            (image_embedding - text_embedding).norm(dim=-1).mean()
         )
 
         self.embed_mode = pre_mode
@@ -1507,10 +1531,11 @@ class CLAPAudioEmbeddingClassifierFreev3(CLAPAudioEmbeddingClassifierFreev2):
         i2a_probs = image_to_audio.softmax(dim=-1).detach().cpu().numpy()
         i2t_probs = image_to_text.softmax(dim=-1).detach().cpu().numpy()
         a2t_probs = audio_to_text.softmax(dim=-1).detach().cpu().numpy()
-        labels = torch.arange(image_to_text.size(0)).numpy()
+        labels = labels.cpu().numpy()
 
         return dict(
-            loss=loss.mean(),
+            ce_loss=ce_loss.mean(),
+            mse_loss=mse_loss.mean(),
             i2a_probs=i2a_probs,
             i2t_probs=i2t_probs,
             a2t_probs=a2t_probs,
