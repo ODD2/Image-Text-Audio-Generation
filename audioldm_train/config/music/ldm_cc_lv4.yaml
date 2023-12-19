@@ -27,7 +27,7 @@ data:
 step:
   validation_every_n_epochs: 5
   save_checkpoint_every_n_steps: 5000
-  # limit_val_batches: 2
+  limit_val_batches: 2
   max_steps: 800000
   save_top_k: 1
 
@@ -141,7 +141,7 @@ model:
         target: audioldm_train.conditional_models.CLAPAudioEmbeddingClassifierFreev3
         params:
           pretrained_path: data/checkpoints/clap_music_speech_audioset_epoch_15_esc_89.98.pt
-          extra_pretrained_path: "log/checkpoints/fzjulv7k/best_model.pt"
+          extra_pretrained_path: "log/checkpoints/j5dd15jr/best_model.pt"
           sampling_rate: 16000
           embed_mode: image # or text
           amodel: HTSAT-base

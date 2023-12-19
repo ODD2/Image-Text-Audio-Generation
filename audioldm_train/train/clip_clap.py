@@ -96,7 +96,7 @@ def main(configs, config_yaml_path, exp_group_name, exp_name, perform_validation
 
     # init wandb
     wandb.init(
-        project="audioldm",
+        project="audioldm_clipclap",
         mode=("offline"if debug else "online")
     )
     wandb.watch(models=clip_clap, log="gradients", log_freq=100)

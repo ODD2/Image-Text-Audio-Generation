@@ -1143,6 +1143,7 @@ class LatentDiffusion(DDPM):
         self.cond_stage_model_metadata = {}
         for i, cond_model_key in enumerate(config.keys()):
             model = instantiate_from_config(config[cond_model_key])
+            model.requires_grad_(False)
             self.cond_stage_models.append(model)
             self.cond_stage_model_metadata[cond_model_key] = {
                 "model_idx": i,
