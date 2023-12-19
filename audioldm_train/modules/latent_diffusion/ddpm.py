@@ -2305,21 +2305,312 @@ class LatentDiffusionV2(LatentDiffusion):
             if issubclass(
                 type(self.cond_stage_models[model_idx]), CLAPAudioEmbeddingClassifierFreev2
             ):
+                image_weight = np.random.beta(0.5, 0.5) * 10
+                text_weight = np.random.beta(0.5, 0.5) * 10
+                audio_weight = np.random.beta(0.5, 0.5) * 10
+                self.cond_stage_models[model_idx].embed_mix_weight = [
+                    image_weight,
+                    text_weight,
+                    audio_weight
+                ]
+
+    def get_learned_conditioning(self, c, key, unconditional_cfg, mix=False):
+        assert key in self.cond_stage_model_metadata.keys()
+
+        # Classifier-free guidance
+        if not unconditional_cfg:
+            if (not mix):
+                c = self.cond_stage_models[
+                    self.cond_stage_model_metadata[key]["model_idx"]
+                ](c)
+            else:
+                c = self.cond_stage_models[
+                    self.cond_stage_model_metadata[key]["model_idx"]
+                ].mixup(c)
+        else:
+            # when the cond_stage_key is "all", pick one random element out
+            if isinstance(c, dict):
+                c = c[list(c.keys())[0]]
+
+            if isinstance(c, torch.Tensor):
+                batchsize = c.size(0)
+            elif isinstance(c, list):
+                batchsize = len(c)
+            else:
+                raise NotImplementedError()
+
+            c = self.cond_stage_models[
+                self.cond_stage_model_metadata[key]["model_idx"]
+            ].get_unconditional_condition(batchsize)
+
+        return c
+
+    def get_input(
+        self,
+        batch,
+        k,
+        return_first_stage_encode=True,
+        return_decoding_output=False,
+        return_encoder_input=False,
+        return_encoder_output=False,
+        unconditional_prob_cfg=0.1,
+    ):
+        x = super(LatentDiffusion, self).get_input(batch, k)
+
+        x = x.to(self.device)
+
+        if return_first_stage_encode:
+            encoder_posterior = self.encode_first_stage(x)
+            z = self.get_first_stage_encoding(encoder_posterior).detach()
+        else:
+            z = None
+        cond_dict = {}
+        if len(self.cond_stage_model_metadata.keys()) > 0:
+            unconditional_cfg = False
+            if self.conditional_dry_run_finished and self.make_decision(
+                unconditional_prob_cfg
+            ):
+                unconditional_cfg = True
+            for cond_model_key in self.cond_stage_model_metadata.keys():
+                cond_stage_key = self.cond_stage_model_metadata[cond_model_key][
+                    "cond_stage_key"
+                ]
+
+                if cond_model_key in cond_dict.keys():
+                    continue
+
+                if not self.training:
+                    if isinstance(
+                        self.cond_stage_models[
+                            self.cond_stage_model_metadata[cond_model_key]["model_idx"]
+                        ],
+                        CLAPAudioEmbeddingClassifierFreev2,
+                    ):
+                        print(
+                            "Warning: CLAP model normally should use text for evaluation"
+                        )
+
+                    # The original data for conditioning
+                    # If cond_model_key is "all", that means the conditional model need all the information from a batch
+                    if cond_stage_key != "all":
+                        xc = super(LatentDiffusion, self).get_input(batch, cond_stage_key)
+                        if type(xc) == torch.Tensor:
+                            xc = xc.to(self.device)
+                    else:
+                        xc = batch
+
+                    # if cond_stage_key is "all", xc will be a dictionary containing all keys
+                    # Otherwise xc will be an entry of the dictionary
+                    c = self.get_learned_conditioning(
+                        xc, key=cond_model_key, unconditional_cfg=unconditional_cfg
+                    )
+                else:
+                    xc = dict(
+                        image=batch["image"].to(self.device),
+                        text=batch["text"],
+                        audio=batch["waveform"].to(self.device),
+                    )
+
+                    # if cond_stage_key is "all", xc will be a dictionary containing all keys
+                    # Otherwise xc will be an entry of the dictionary
+                    c = self.get_learned_conditioning(
+                        xc,
+                        key=cond_model_key,
+                        unconditional_cfg=unconditional_cfg,
+                        mix=True
+                    )
+
+                # cond_dict will be used to condition the diffusion model
+                # If one conditional model return multiple conditioning signal
+                if isinstance(c, dict):
+                    for k in c.keys():
+                        cond_dict[k] = c[k]
+                else:
+                    cond_dict[cond_model_key] = c
+
+        # If the key is accidently added to the dictionary and not in the condition list, remove the condition
+        # for k in list(cond_dict.keys()):
+        #     if(k not in self.cond_stage_model_metadata.keys()):
+        #         del cond_dict[k]
+
+        out = [z, cond_dict]
+
+        if return_decoding_output:
+            xrec = self.decode_first_stage(z)
+            out += [xrec]
+
+        if return_encoder_input:
+            out += [x]
+
+        if return_encoder_output:
+            out += [encoder_posterior]
+
+        if not self.conditional_dry_run_finished:
+            self.conditional_dry_run_finished = True
+
+        # Output is a dictionary, where the value could only be tensor or tuple
+        return out
+
+    def on_validation_epoch_start(self) -> None:
+        # Use text as condition during validation
+        for key in self.cond_stage_model_metadata.keys():
+            metadata = self.cond_stage_model_metadata[key]
+            model_idx, cond_stage_key, conditioning_key = (
+                metadata["model_idx"],
+                metadata["cond_stage_key"],
+                metadata["conditioning_key"],
+            )
+
+            # If we use CLAP as condition, we might use audio for training, but we also must use text for evaluation
+            if isinstance(
+                self.cond_stage_models[model_idx], CLAPAudioEmbeddingClassifierFreev2
+            ):
                 self.cond_stage_model_metadata[key][
                     "cond_stage_key_orig"
                 ] = self.cond_stage_model_metadata[key]["cond_stage_key"]
                 self.cond_stage_model_metadata[key][
                     "embed_mode_orig"
                 ] = self.cond_stage_models[model_idx].embed_mode
-                if torch.randn(1).item() < 0.333:
-                    self.cond_stage_model_metadata[key]["cond_stage_key"] = "text"
-                    self.cond_stage_models[model_idx].embed_mode = "text"
-                elif 0.333 < torch.randn(1).item() < 0.666:
-                    self.cond_stage_model_metadata[key]["cond_stage_key"] = "waveform"
-                    self.cond_stage_models[model_idx].embed_mode = "audio"
-                else:
-                    self.cond_stage_model_metadata[key]["cond_stage_key"] = "image"
-                    self.cond_stage_models[model_idx].embed_mode = "image"
+                print(
+                    "Change the model original cond_keyand embed_mode %s, %s to text during evaluation"
+                    % (
+                        self.cond_stage_model_metadata[key]["cond_stage_key_orig"],
+                        self.cond_stage_model_metadata[key]["embed_mode_orig"],
+                    )
+                )
+                self.cond_stage_model_metadata[key]["cond_stage_key"] = "image"
+                self.cond_stage_models[model_idx].embed_mode = "image"
+
+            if isinstance(
+                self.cond_stage_models[model_idx], CLAPGenAudioMAECond
+            ) or isinstance(self.cond_stage_models[model_idx], SequenceGenAudioMAECond):
+                self.cond_stage_model_metadata[key][
+                    "use_gt_mae_output_orig"
+                ] = self.cond_stage_models[model_idx].use_gt_mae_output
+                self.cond_stage_model_metadata[key][
+                    "use_gt_mae_prob_orig"
+                ] = self.cond_stage_models[model_idx].use_gt_mae_prob
+                print("Change the model condition to the predicted AudioMAE tokens")
+                self.cond_stage_models[model_idx].use_gt_mae_output = False
+                self.cond_stage_models[model_idx].use_gt_mae_prob = 0.0
+        self.validation_folder_name = self.get_validation_folder_name()
+
+    @torch.no_grad()
+    def generate_sample(
+        self,
+        batchs,
+        ddim_steps=200,
+        ddim_eta=1.0,
+        x_T=None,
+        n_gen=1,
+        unconditional_guidance_scale=1.0,
+        unconditional_conditioning=None,
+        name=None,
+        use_plms=False,
+        limit_num=None,
+        **kwargs,
+    ):
+        # Generate n_gen times and select the best
+        # Batch: audio, text, fnames
+        assert x_T is None
+        try:
+            batchs = iter(batchs)
+        except TypeError:
+            raise ValueError("The first input argument should be an iterable object")
+
+        if use_plms:
+            assert ddim_steps is not None
+
+        use_ddim = ddim_steps is not None
+        if name is None:
+            name = self.get_validation_folder_name()
+
+        waveform_save_path = os.path.join(self.get_log_dir(), name)
+        waveform_save_path = waveform_save_path.replace("val_0", "infer")
+
+        os.makedirs(waveform_save_path, exist_ok=True)
+        print("Waveform inference save path: ", waveform_save_path)
+
+        with self.ema_scope("Plotting"):
+            for i, batch in enumerate(batchs):
+                z, c = self.get_input(
+                    batch,
+                    self.first_stage_key,
+                    unconditional_prob_cfg=0.0,  # Do not output unconditional information in the c
+                )
+
+                if limit_num is not None and i * z.size(0) > limit_num:
+                    break
+
+                c = self.filter_useful_cond_dict(c)
+
+                text = super(LatentDiffusion, self).get_input(batch, "text")
+
+                # Generate multiple samples
+                batch_size = z.shape[0] * n_gen
+
+                # Generate multiple samples at a time and filter out the best
+                # The condition to the diffusion wrapper can have many format
+                for cond_key in c.keys():
+                    if isinstance(c[cond_key], list):
+                        for i in range(len(c[cond_key])):
+                            c[cond_key][i] = torch.cat([c[cond_key][i]] * n_gen, dim=0)
+                    elif isinstance(c[cond_key], dict):
+                        for k in c[cond_key].keys():
+                            c[cond_key][k] = torch.cat([c[cond_key][k]] * n_gen, dim=0)
+                    else:
+                        c[cond_key] = torch.cat([c[cond_key]] * n_gen, dim=0)
+
+                text = text * n_gen
+
+                if unconditional_guidance_scale != 1.0:
+                    unconditional_conditioning = {}
+                    for key in self.cond_stage_model_metadata:
+                        model_idx = self.cond_stage_model_metadata[key]["model_idx"]
+                        unconditional_conditioning[key] = self.cond_stage_models[
+                            model_idx
+                        ].get_unconditional_condition(batch_size)
+
+                fnames = list(super(LatentDiffusion, self).get_input(batch, "fname"))
+
+                samples, _ = self.sample_log(
+                    cond=c,
+                    batch_size=batch_size,
+                    x_T=x_T,
+                    ddim=use_ddim,
+                    ddim_steps=ddim_steps,
+                    eta=ddim_eta,
+                    unconditional_guidance_scale=unconditional_guidance_scale,
+                    unconditional_conditioning=unconditional_conditioning,
+                    use_plms=use_plms,
+                )
+
+                mel = self.decode_first_stage(samples)
+
+                waveform = self.mel_spectrogram_to_waveform(
+                    mel, savepath=waveform_save_path, bs=None, name=fnames, save=False
+                )
+
+                if n_gen > 1:
+                    try:
+                        best_index = []
+                        similarity = self.clap.cos_similarity(
+                            torch.FloatTensor(waveform).squeeze(1), text
+                        )
+                        for i in range(z.shape[0]):
+                            candidates = similarity[i:: z.shape[0]]
+                            max_index = torch.argmax(candidates).item()
+                            best_index.append(i + max_index * z.shape[0])
+
+                        waveform = waveform[best_index]
+
+                        print("Similarity between generated audio and text", similarity)
+                        print("Choose the following indexes:", best_index)
+                    except Exception as e:
+                        print("Warning: while calculating CLAP score (not fatal), ", e)
+
+                self.save_waveform(waveform, waveform_save_path, name=fnames)
+        return waveform_save_path
 
 
 if __name__ == "__main__":

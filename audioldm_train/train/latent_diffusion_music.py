@@ -245,6 +245,9 @@ if __name__ == "__main__":
     config_yaml_path = os.path.join(config_yaml)
     config_yaml = yaml.load(open(config_yaml_path, "r"), Loader=yaml.FullLoader)
 
+    if (args.debug):
+        config_yaml["model"]["params"]["evaluation_params"]["ddim_sampling_steps"] = 50
+
     if args.reload_from_ckpt is not None:
         config_yaml["reload_from_ckpt"] = args.reload_from_ckpt
 

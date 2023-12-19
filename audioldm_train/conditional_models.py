@@ -1513,6 +1513,24 @@ class CLAPAudioEmbeddingClassifierFreev3(CLAPAudioEmbeddingClassifierFreev2):
         else:
             return embed
 
+    # image,text,audio
+    def mixup(self, batch):
+        prev_unconditional_prob = self.unconditional_prob
+        self.unconditional_prob = 0.0
+
+        weight = torch.tensor(self.embed_mix_weight)
+        weight /= weight.sum()
+
+        prev_embed_mode = self.embed_mode
+        embed = 0
+        for i, embed_mode in enumerate(["image", "text", "audio"]):
+            self.embed_mode = embed_mode
+            embed += self(batch[embed_mode]) * weight[i]
+
+        self.unconditional_prob = prev_unconditional_prob
+        self.embed_mode = prev_embed_mode
+        return embed
+
     def three_modal_contrastive_loss(self, datas):
         modal_embed = {}
         pre_mode = self.embed_mode
